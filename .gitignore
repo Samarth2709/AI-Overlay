@@ -37,4 +37,10 @@ yarn-error.log*
 *.swp
 *~
 
+# Archive files
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
 backend/logs/
