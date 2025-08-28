@@ -1,29 +1,138 @@
+import { conversationDb } from './database.js';
+
 const DEFAULT_TTL_MS = 1000 * 60 * 60 * 2; // 2 hours
 
 class ConversationStore {
 	constructor(options = {}) {
 		this.ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
-		this.store = new Map(); // id -> { messages: [], updatedAt: number }
+		// Keep in-memory cache for fast access (backwards compatibility)
+		this.store = new Map(); // id -> { messages: [], updatedAt: number, transcript: { chatId, createdAt, updatedAt, chatHistory: [] } }
 		this.cleanupInterval = setInterval(() => this.cleanup(), Math.min(this.ttlMs, 60_000));
+		this.db = conversationDb;
 	}
 
 	createConversation() {
 		const id = `c_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
-		this.store.set(id, { messages: [], updatedAt: Date.now() });
+		const now = Date.now();
+		
+		// Create in database
+		this.db.createConversation(id);
+		
+		// Create in memory cache
+		this.store.set(id, {
+			messages: [],
+			updatedAt: now,
+			transcript: {
+				chatId: id,
+				createdAt: now,
+				updatedAt: now,
+				chatHistory: []
+			}
+		});
 		return id;
 	}
 
-	appendMessage(conversationId, role, content) {
+	appendMessage(conversationId, role, content, details = {}) {
+		// Save to database first
+		try {
+			this.db.addMessage(conversationId, role, content, details);
+		} catch (err) {
+			console.error('Failed to save message to database:', err);
+			// Continue with in-memory operation even if DB fails
+		}
+		
+		// Update in-memory cache
 		const convo = this.store.get(conversationId);
-		if (!convo) return false;
+		if (!convo) {
+			// If not in cache, try to load from database
+			const dbConvo = this.db.getStandardizedConversation(conversationId);
+			if (dbConvo) {
+				this._loadConversationToCache(conversationId, dbConvo);
+				return true;
+			}
+			return false;
+		}
+		
+		const now = Date.now();
 		convo.messages.push({ role, content });
-		convo.updatedAt = Date.now();
+		convo.updatedAt = now;
+		
+		// Maintain standardized transcript alongside raw messages
+		if (!convo.transcript) {
+			convo.transcript = { chatId: conversationId, createdAt: now, updatedAt: now, chatHistory: [] };
+		}
+		const entry = { role, content, at: now };
+		// Only attach recognized metadata keys to avoid bloat
+		if (details && typeof details === 'object') {
+			const { model, provider, usage } = details;
+			if (model) entry.model = model;
+			if (provider) entry.provider = provider;
+			if (usage) entry.usage = usage;
+		}
+		convo.transcript.chatHistory.push(entry);
+		convo.transcript.updatedAt = now;
 		return true;
 	}
 
 	getMessages(conversationId) {
 		const convo = this.store.get(conversationId);
-		return convo ? convo.messages.slice() : null;
+		if (convo) {
+			return convo.messages.slice();
+		}
+		
+		// Fallback to database if not in cache
+		try {
+			const messages = this.db.getConversationMessages(conversationId);
+			return messages.map(msg => ({ role: msg.role, content: msg.content }));
+		} catch (err) {
+			console.error('Failed to get messages from database:', err);
+			return null;
+		}
+	}
+
+	/**
+	 * Returns the standardized transcript for this conversation.
+	 */
+	getConversation(conversationId) {
+		const convo = this.store.get(conversationId);
+		if (convo && convo.transcript) {
+			// Return a shallow clone to prevent external mutations
+			return {
+				chatId: convo.transcript.chatId,
+				createdAt: convo.transcript.createdAt,
+				updatedAt: convo.transcript.updatedAt,
+				chatHistory: convo.transcript.chatHistory.slice()
+			};
+		}
+		
+		// Fallback to database
+		try {
+			return this.db.getStandardizedConversation(conversationId);
+		} catch (err) {
+			console.error('Failed to get conversation from database:', err);
+			return null;
+		}
+	}
+
+	/**
+	 * Helper method to load conversation from database into cache
+	 */
+	_loadConversationToCache(conversationId, dbConvo) {
+		if (!dbConvo) return;
+		
+		this.store.set(conversationId, {
+			messages: dbConvo.chatHistory.map(entry => ({ 
+				role: entry.role, 
+				content: entry.content 
+			})),
+			updatedAt: dbConvo.updatedAt,
+			transcript: {
+				chatId: dbConvo.chatId,
+				createdAt: dbConvo.createdAt,
+				updatedAt: dbConvo.updatedAt,
+				chatHistory: dbConvo.chatHistory.slice()
+			}
+		});
 	}
 
 	touch(conversationId) {
@@ -32,27 +141,82 @@ class ConversationStore {
 	}
 
 	delete(conversationId) {
+		// Delete from database
+		try {
+			this.db.deleteConversationById(conversationId);
+		} catch (err) {
+			console.error('Failed to delete conversation from database:', err);
+		}
+		
+		// Delete from cache
 		return this.store.delete(conversationId);
 	}
 
 	getMeta(conversationId) {
 		const convo = this.store.get(conversationId);
-		if (!convo) return null;
-		return { updatedAt: convo.updatedAt, messagesCount: convo.messages.length };
+		if (convo) {
+			return { updatedAt: convo.updatedAt, messagesCount: convo.messages.length };
+		}
+		
+		// Fallback to database
+		try {
+			const dbConvo = this.db.getConversationById(conversationId);
+			if (!dbConvo) return null;
+			
+			const messages = this.db.getConversationMessages(conversationId);
+			return { updatedAt: dbConvo.updated_at, messagesCount: messages.length };
+		} catch (err) {
+			console.error('Failed to get conversation meta from database:', err);
+			return null;
+		}
 	}
 
 	cleanup() {
 		const now = Date.now();
+		
+		// Clean up in-memory cache
 		for (const [id, convo] of this.store.entries()) {
 			if (now - convo.updatedAt > this.ttlMs) {
 				this.store.delete(id);
 			}
+		}
+		
+		// Clean up old conversations in database (optional - keep longer than cache)
+		try {
+			const dbCleanupAge = this.ttlMs * 7; // Keep in DB 7x longer than cache
+			this.db.cleanup(dbCleanupAge);
+		} catch (err) {
+			console.error('Database cleanup failed:', err);
 		}
 	}
 
 	dispose() {
 		clearInterval(this.cleanupInterval);
 		this.store.clear();
+		try {
+			this.db.close();
+		} catch (err) {
+			console.error('Failed to close database:', err);
+		}
+	}
+
+	// New database-specific methods
+	getConversationList(limit = 50, offset = 0) {
+		try {
+			return this.db.getConversations(limit, offset);
+		} catch (err) {
+			console.error('Failed to get conversation list from database:', err);
+			return [];
+		}
+	}
+
+	getDbStats() {
+		try {
+			return this.db.getStats();
+		} catch (err) {
+			console.error('Failed to get database stats:', err);
+			return { conversations: 0, messages: 0, databaseSize: 0 };
+		}
 	}
 }
 
