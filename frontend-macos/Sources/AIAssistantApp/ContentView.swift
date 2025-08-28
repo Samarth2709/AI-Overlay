@@ -90,6 +90,7 @@ struct ChatBubble: View {
 	}
 }
 
+
 struct ContentView: View {
 	@State private var messages: [Message] = []
 	@State private var input: String = ""
@@ -100,115 +101,54 @@ struct ContentView: View {
 	@State private var selectedModel: Model?
 	@State private var isLoadingModels: Bool = true
 	@FocusState private var isInputFocused: Bool
+	@State private var showModelToast: Bool = false
+	@State private var modelToastText: String = ""
+	@State private var scrollToMessageId: UUID? = nil
 
 	private let apiBaseURL = URL(string: "http://127.0.0.1:7071")!
 
 	var body: some View {
-		VStack(spacing: 10) {
-			// Header – full-width bar with bottom divider
-			HStack(spacing: 8) {
-				Text("AI Assistant")
-					.font(.custom("Montserrat", size: 13).weight(.medium))
-					.foregroundColor(.secondary)
-				Spacer()
-				Menu {
-					if isLoadingModels {
-						Text("Loading models...")
-							.foregroundColor(.secondary)
-					} else {
-						ForEach(availableModels) { model in
-							Button(action: { selectedModel = model }) {
-								VStack(alignment: .leading, spacing: 2) {
-									Text(model.name)
-										.font(.custom("Montserrat", size: 11).weight(.regular))
-									Text(model.description)
-										.font(.custom("Montserrat", size: 10).weight(.light))
-										.foregroundColor(.secondary)
-								}
-							}
-						}
-					}
-				} label: {
-					HStack(spacing: 4) {
-						if isLoadingModels {
-							Text("Loading...")
-						} else {
-							Text(selectedModel?.name ?? "Select Model")
-						}
-						Image(systemName: "chevron.down")
-					}
-				}
-				.buttonStyle(.borderless)
-				.disabled(isLoadingModels)
-				Button("New Chat") { startNewChat() }
-					.buttonStyle(.bordered)
-			}
-			.frame(maxWidth: .infinity)
-			.padding(.vertical, 6)
-			.overlay(alignment: .bottom) {
-				Rectangle()
-					.fill(Color.white.opacity(0.08))
-					.frame(height: 1)
-			}
-
-			ScrollViewReader { proxy in
-				ScrollView {
-					LazyVStack(alignment: .leading, spacing: 14) {
-						ForEach(messages) { msg in
-							ChatBubble(
-								message: msg,
-								isTyping: isSending && msg.role == "assistant" && msg.content.isEmpty,
-								onCopy: { copyMessage(msg) },
-								onRedo: { redoAssistantMessage(msg) }
-							)
-							.id(msg.id)
-						}
-					}
-					.padding(.vertical, 6)
-				}
-				.frame(maxWidth: .infinity, maxHeight: .infinity)
-				.onChange(of: messages) { _ in
-					if let lastId = messages.last?.id {
-						withAnimation { proxy.scrollTo(lastId, anchor: .bottom) }
-					}
-				}
-			}
-
-			// Footer input
-			HStack(spacing: 10) {
-				HStack(spacing: 8) {
-					Image(systemName: "sparkles")
-						.foregroundColor(.secondary)
-					TextField("Ask anything", text: $input)
-						.textFieldStyle(.plain)
-						.font(.custom("Montserrat", size: 12).weight(.medium))
-						.focused($isInputFocused)
-				}
-				.padding(.horizontal, 12)
-				.frame(height: 36)
-				.background(.thinMaterial)
-				.cornerRadius(12)
-				.overlay(
-					RoundedRectangle(cornerRadius: 12)
-						.stroke(Color.white.opacity(0.06), lineWidth: 1)
+		Group {
+			if messages.isEmpty {
+				// Compact input-only view
+				CompactInputView(
+					input: $input,
+					isSending: $isSending,
+					selectedModel: selectedModel,
+					availableModels: availableModels,
+					isLoadingModels: isLoadingModels,
+					onModelSelect: { selectedModel = $0 },
+					onSend: send,
+					onNewChat: startNewChat
 				)
-				.onSubmit { send() }
-
-				Button(action: send) {
-					Text("Send")
-						.font(.custom("Montserrat", size: 12).weight(.medium))
-				}
-				.buttonStyle(.borderedProminent)
+			} else {
+				// Expanded view with conversation
+				ExpandedChatView(
+					messages: messages,
+					input: $input,
+					isSending: $isSending,
+					targetMessageId: scrollToMessageId,
+					selectedModel: selectedModel,
+					availableModels: availableModels,
+					isLoadingModels: isLoadingModels,
+					onModelSelect: { selectedModel = $0 },
+					onSend: send,
+					onNewChat: startNewChat,
+					onCopy: copyMessage,
+					onRedo: redoAssistantMessage
+				)
 			}
 		}
-		.padding(14)
-		.frame(minWidth: 420, minHeight: 480)
 		.onAppear {
 			loadAvailableModels()
+			updateWindowSize()
 			// Focus the input field when the view appears
 			DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
 				isInputFocused = true
 			}
+		}
+		.onChange(of: messages) { _ in
+			updateWindowSize()
 		}
 		.onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
 			// Focus the input field when the app becomes active
@@ -225,11 +165,54 @@ struct ContentView: View {
 		.onReceive(NotificationCenter.default.publisher(for: .startNewChat)) { _ in
 			startNewChat()
 		}
+		.onReceive(NotificationCenter.default.publisher(for: .cycleModel)) { _ in
+			cycleModel()
+		}
+		.overlay(alignment: .topTrailing) {
+			if showModelToast {
+				Text(modelToastText)
+					.font(.custom("Montserrat", size: 11).weight(.medium))
+					.padding(.horizontal, 10)
+					.padding(.vertical, 6)
+					.background(.ultraThinMaterial)
+					.cornerRadius(8)
+					.transition(.opacity.combined(with: .move(edge: .top)))
+					.padding(.trailing, 10)
+					.padding(.top, 10)
+			}
+		}
 	}
 
 	private func startNewChat() {
 		messages.removeAll()
 		conversationId = nil
+	}
+
+	private func cycleModel() {
+		guard !availableModels.isEmpty else { return }
+		if let current = selectedModel, let idx = availableModels.firstIndex(where: { $0.id == current.id }) {
+			let nextIdx = (idx + 1) % availableModels.count
+			selectedModel = availableModels[nextIdx]
+		} else {
+			selectedModel = availableModels.first
+		}
+		// Show toast
+		if let name = selectedModel?.name {
+			modelToastText = name
+			showModelToast = true
+			DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+				withAnimation(.easeOut(duration: 0.2)) { showModelToast = false }
+			}
+		}
+	}
+	
+	private func updateWindowSize() {
+		let width: CGFloat = 360
+		let height: CGFloat = messages.isEmpty ? 60 : min(500, max(200, CGFloat(messages.count * 80 + 120)))
+		
+		DispatchQueue.main.async {
+			OverlayWindow.shared.updateSize(width: width, height: height, animated: !messages.isEmpty)
+		}
 	}
 
 	private func send() {
@@ -238,6 +221,9 @@ struct ContentView: View {
 		messages.append(Message(role: "user", content: text))
 		input = ""
 		isSending = true
+
+		// Force scroll to bottom after adding user message
+		// No auto-scroll on user message; assistant bubble will handle scroll
 
 		Task { await streamBackend(message: text, conversationId: conversationId, model: selectedModel?.id, regenerate: false) }
 	}
@@ -297,10 +283,14 @@ struct ContentView: View {
 						}
 						await MainActor.run {
 							if assistantIndex == nil {
-								messages.append(Message(role: "assistant", content: ""))
+								let newMessage = Message(role: "assistant", content: "")
+								messages.append(newMessage)
 								assistantIndex = messages.count - 1
+								// set target id for immediate scroll
+								scrollToMessageId = newMessage.id
 							} else if let idx = assistantIndex, idx < messages.count {
 								messages[idx] = Message(role: "assistant", content: "")
+								scrollToMessageId = messages[idx].id
 							}
 						}
 					} else if type == "token" {
@@ -438,6 +428,294 @@ struct ContentView: View {
 		guard let idx = messages.firstIndex(where: { $0.id == message.id }) else { return }
 		isSending = true
 		Task { await refreshBackend(conversationId: conversationId, model: selectedModel?.id, replaceAssistantAt: idx) }
+	}
+}
+
+// MARK: - Compact Input View
+
+struct CompactInputView: View {
+	@Binding var input: String
+	@Binding var isSending: Bool
+	@FocusState private var isInputFocused: Bool
+	
+	let selectedModel: Model?
+	let availableModels: [Model]
+	let isLoadingModels: Bool
+	let onModelSelect: (Model) -> Void
+	let onSend: () -> Void
+	let onNewChat: () -> Void
+	
+	var body: some View {
+		HStack(spacing: 8) {
+			Image(systemName: "sparkles")
+				.foregroundColor(.secondary)
+				.font(.system(size: 12))
+			
+			TextField("Ask anything...", text: $input)
+				.textFieldStyle(.plain)
+				.font(.custom("Montserrat", size: 13).weight(.medium))
+				.focused($isInputFocused)
+				.onSubmit { onSend() }
+			
+			if !input.isEmpty {
+				Button(action: onSend) {
+					Image(systemName: "arrow.up.circle.fill")
+						.foregroundColor(.primary)
+						.font(.system(size: 16))
+				}
+				.buttonStyle(.plain)
+				.opacity(isSending ? 0.5 : 1.0)
+				.disabled(isSending)
+			} else {
+				Menu {
+					if isLoadingModels {
+						Text("Loading models...")
+							.foregroundColor(.secondary)
+					} else {
+						ForEach(availableModels) { model in
+							Button(action: { onModelSelect(model) }) {
+								VStack(alignment: .leading, spacing: 2) {
+									Text(model.name)
+										.font(.custom("Montserrat", size: 11).weight(.regular))
+									Text(model.description)
+										.font(.custom("Montserrat", size: 10).weight(.light))
+										.foregroundColor(.secondary)
+								}
+							}
+						}
+					}
+				} label: {
+					Image(systemName: "cube.box")
+						.foregroundColor(.secondary)
+						.font(.system(size: 12))
+				}
+				.buttonStyle(.plain)
+				.disabled(isLoadingModels)
+			}
+		}
+		.padding(.horizontal, 14)
+		.padding(.vertical, 10)
+		.frame(maxWidth: .infinity)
+		.frame(height: 40)
+		.onAppear {
+			DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+				isInputFocused = true
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: .focusInput)) { _ in
+			DispatchQueue.main.async {
+				isInputFocused = true
+			}
+		}
+	}
+}
+
+// MARK: - Expanded Chat View
+
+struct ExpandedChatView: View {
+	let messages: [Message]
+	@Binding var input: String
+	@Binding var isSending: Bool
+	let targetMessageId: UUID?
+	@FocusState private var isInputFocused: Bool
+	@State private var scrollViewID = UUID()
+	@State private var lastContentLength = 0
+	
+	let selectedModel: Model?
+	let availableModels: [Model]
+	let isLoadingModels: Bool
+	let onModelSelect: (Model) -> Void
+	let onSend: () -> Void
+	let onNewChat: () -> Void
+	let onCopy: (Message) -> Void
+	let onRedo: (Message) -> Void
+	
+	var body: some View {
+		VStack(spacing: 0) {
+			// Minimal header
+			HStack(spacing: 8) {
+				Text("AI Assistant")
+					.font(.custom("Montserrat", size: 11).weight(.medium))
+					.foregroundColor(.secondary)
+				
+				Spacer()
+				
+				Button(action: onNewChat) {
+					Image(systemName: "plus.circle")
+						.font(.system(size: 12))
+						.foregroundColor(.secondary)
+				}
+				.buttonStyle(.plain)
+				
+				Menu {
+					if isLoadingModels {
+						Text("Loading models...")
+							.foregroundColor(.secondary)
+					} else {
+						ForEach(availableModels) { model in
+							Button(action: { onModelSelect(model) }) {
+								VStack(alignment: .leading, spacing: 2) {
+									Text(model.name)
+										.font(.custom("Montserrat", size: 11).weight(.regular))
+									Text(model.description)
+										.font(.custom("Montserrat", size: 10).weight(.light))
+										.foregroundColor(.secondary)
+								}
+							}
+						}
+					}
+				} label: {
+					Image(systemName: "cube.box")
+						.foregroundColor(.secondary)
+						.font(.system(size: 12))
+				}
+				.buttonStyle(.plain)
+				.disabled(isLoadingModels)
+			}
+			.padding(.horizontal, 14)
+			.padding(.vertical, 8)
+			.overlay(alignment: .bottom) {
+				Rectangle()
+					.fill(Color.white.opacity(0.04))
+					.frame(height: 0.5)
+			}
+			
+			// Messages
+			ScrollViewReader { proxy in
+				ScrollView {
+					LazyVStack(alignment: .leading, spacing: 10) {
+						ForEach(messages) { msg in
+							CompactChatBubble(
+								message: msg,
+								isTyping: isSending && msg.role == "assistant" && msg.content.isEmpty,
+								onCopy: { onCopy(msg) },
+								onRedo: { onRedo(msg) }
+							)
+							.id(msg.id)
+						}
+					}
+					.padding(.horizontal, 14)
+					.padding(.vertical, 8)
+				}
+				.frame(maxWidth: .infinity, maxHeight: .infinity)
+				.id(scrollViewID)
+				.onChange(of: targetMessageId) { id in
+					guard let id else { return }
+					DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
+						withAnimation(.easeOut(duration: 0.2)) {
+							proxy.scrollTo(id, anchor: .bottom)
+						}
+					}
+				}
+				.onReceive(Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()) { _ in
+					// Check if content has changed during streaming
+					if let lastMessage = messages.last, lastMessage.role == "assistant" {
+						let currentLength = lastMessage.content.count
+						if currentLength != lastContentLength {
+							lastContentLength = currentLength
+							// Scroll immediately on content change
+							proxy.scrollTo(lastMessage.id, anchor: .bottom)
+						}
+					}
+				}
+			}
+			
+			// Input
+			HStack(spacing: 8) {
+							TextField("Ask anything...", text: $input)
+				.textFieldStyle(.plain)
+				.font(.custom("Montserrat", size: 12).weight(.medium))
+				.focused($isInputFocused)
+				.onSubmit { onSend() }
+				
+				Button(action: onSend) {
+					Image(systemName: input.isEmpty ? "arrow.up.circle" : "arrow.up.circle.fill")
+						.foregroundColor(input.isEmpty ? .secondary : .primary)
+						.font(.system(size: 16))
+				}
+				.buttonStyle(.plain)
+				.opacity(isSending ? 0.5 : 1.0)
+				.disabled(isSending || input.isEmpty)
+			}
+			.padding(.horizontal, 14)
+			.padding(.vertical, 10)
+			.overlay(alignment: .top) {
+				Rectangle()
+					.fill(Color.white.opacity(0.04))
+					.frame(height: 0.5)
+			}
+			// Toast is now at ContentView level, remove inner toast
+		}
+		.onAppear {
+			DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+				isInputFocused = true
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: .focusInput)) { _ in
+			DispatchQueue.main.async {
+				isInputFocused = true
+			}
+		}
+	}
+}
+
+// MARK: - Compact Chat Bubble
+
+struct CompactChatBubble: View {
+	let message: Message
+	var isTyping: Bool = false
+	var onCopy: (() -> Void)? = nil
+	var onRedo: (() -> Void)? = nil
+	
+	var body: some View {
+		HStack(alignment: .top, spacing: 8) {
+			if message.role == "assistant" {
+				VStack(alignment: .leading, spacing: 6) {
+					Group {
+						if isTyping && message.content.isEmpty {
+							TypingDots()
+								.frame(maxWidth: .infinity, alignment: .leading)
+						} else {
+							Text(message.content)
+								.font(.custom("Montserrat", size: 13).weight(.light))
+								.frame(maxWidth: .infinity, alignment: .leading)
+								.textSelection(.enabled)
+						}
+					}
+					
+					if !isTyping && !message.content.isEmpty {
+						HStack(spacing: 10) {
+							Button(action: { onCopy?() }) {
+								Image(systemName: "doc.on.doc")
+									.font(.system(size: 10))
+									.foregroundColor(.secondary)
+							}
+							.buttonStyle(.plain)
+							
+							Button(action: { onRedo?() }) {
+								Image(systemName: "arrow.clockwise")
+									.font(.system(size: 10))
+									.foregroundColor(.secondary)
+							}
+							.buttonStyle(.plain)
+						}
+					}
+				}
+				.padding(10)
+				.background(.ultraThinMaterial)
+				.cornerRadius(10)
+				.frame(maxWidth: .infinity, alignment: .leading)
+			} else {
+				Spacer(minLength: 30)
+				Text(message.content)
+					.font(.custom("Montserrat", size: 12).weight(.medium))
+					.padding(.vertical, 8)
+					.padding(.horizontal, 12)
+					.background(Color.white.opacity(0.1))
+					.cornerRadius(10)
+					.frame(maxWidth: 280, alignment: .trailing)
+			}
+		}
 	}
 }
 
