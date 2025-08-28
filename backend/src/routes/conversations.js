@@ -8,9 +8,17 @@ export default async function conversationsRoutes(app, _opts) {
 
 	app.get('/v1/conversations/:id', async (request, reply) => {
 		const { id } = request.params;
-		const meta = conversationStore.getMeta(id);
-		if (!meta) return reply.code(404).send({ error: 'Not found' });
-		return { conversationId: id, ...meta };
+		const conversation = conversationStore.getConversation(id);
+		if (!conversation) return reply.code(404).send({ error: 'Not found' });
+		return { conversationId: id, conversation };
+	});
+
+	app.get('/v1/conversations', async (request, reply) => {
+		const limit = parseInt(request.query.limit) || 50;
+		const offset = parseInt(request.query.offset) || 0;
+		const conversations = conversationStore.getConversationList(limit, offset);
+		const stats = conversationStore.getDbStats();
+		return { conversations, stats, pagination: { limit, offset } };
 	});
 
 	app.delete('/v1/conversations/:id', async (request, reply) => {
