@@ -44,3 +44,9 @@ yarn-error.log*
 *.7z
 
 backend/logs/
+
+# Database
+backend/data/
+*.db
+*.db-wal
+*.db-shm
