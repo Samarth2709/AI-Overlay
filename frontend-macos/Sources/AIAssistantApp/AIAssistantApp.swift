@@ -32,10 +32,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 		
 		// Add local event monitor for Cmd+N
 		keyEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+			// Cmd+N → New chat
 			if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "n" {
-				// Check if overlay window is visible
 				if OverlayWindow.shared.isVisible {
 					self?.startNewChat()
+					return nil // Consume the event
+				}
+			}
+			// Cmd+M → Cycle models (only when overlay visible)
+			if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "m" {
+				if OverlayWindow.shared.isVisible {
+					NotificationCenter.default.post(name: .cycleModel, object: nil)
 					return nil // Consume the event
 				}
 			}
@@ -69,6 +76,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 extension Notification.Name {
 	static let startNewChat = Notification.Name("startNewChat")
 	static let focusInput = Notification.Name("focusInput")
+	static let cycleModel = Notification.Name("cycleModel")
 }
 
 // MARK: - Font Registration
