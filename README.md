@@ -211,6 +211,14 @@ swift run
 - Keep API keys only in backend `.env` (never in the macOS app).
 - If you use local models, the backend can run fully offline.
 
+### TODO
+- MAke the ai responses formatted properly with latex formatting
+- Make the overlay stay in the same place it was last placed to. 
+- Make a visualizer for the database.
+- Make a switch modes option so the user can switch between system prompts. 
+- Make a edit feature so the user can edit ANY of their messages (only user messages)
+- Add screensharing capabilities
+
 ### Roadmap Ideas
 - Wire dropdown options to backend parameters (style, model, temperature).
 - Streaming responses and token-by-token UI.
