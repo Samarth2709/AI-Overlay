@@ -146,6 +146,7 @@ swift run
 - Toggle overlay: Option+Space
 - Hide overlay: Esc or Option+Space
 - Send: Enter or the Send button
+- Refresh last AI answer: click the clockwise arrow on an assistant bubble
 
 ### API Contract
 - **Create Conversation**
@@ -174,8 +175,21 @@ swift run
     - Gemini: `gemini-2.5-pro`, `gemini-2.5-flash`
     - Grok: `grok-4`
 
+- **Refresh AI Response**
+  - `POST /v1/chat/refresh` (SSE streaming)
+  - Body: `{ "conversationId": string, "model"?: string }`
+  - Behavior:
+    - Removes the most recent assistant message from the conversation (if present)
+    - Re-sends the conversation history up to the last user message to the selected model
+    - Streams a brand-new assistant response without echoing the previous assistant message
+  - SSE events:
+    - `init`: `{ conversationId, model }`
+    - `token`: `{ token }` – incremental text chunks
+    - `done`: `{ conversationId, model, usage, text, conversation }`
+    - `error`: `{ error }`
+
 ### Streaming
-- Backend exposes `GET /v1/chat/stream` (SSE `text/event-stream`) for incremental tokens.
+- Backend exposes `GET /v1/chat/stream` and `POST /v1/chat/refresh` (both SSE `text/event-stream`) for incremental tokens.
 - Providers:
   - OpenAI: native streaming via Chat Completions.
   - Gemini: native streaming; backend relays tokens as SSE. For a smoother UX, Gemini tokens are forwarded word-by-word with tiny delays.
