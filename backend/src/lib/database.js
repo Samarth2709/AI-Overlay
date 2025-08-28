@@ -1,24 +1,45 @@
+/**
+ * Conversation Database Management
+ * 
+ * Provides a SQLite-based persistence layer for conversation data.
+ * Uses WAL mode for better concurrent access and prepared statements for performance.
+ * 
+ * Database Schema:
+ * - conversations: Stores conversation metadata
+ * - messages: Stores individual messages with usage tracking
+ */
+
 import Database from 'better-sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+// Get current file directory for ES modules
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Database file path
+// Database file path - configurable via environment variable
 const DB_PATH = process.env.DATABASE_PATH || path.resolve(__dirname, '../../data/conversations.db');
 
+/**
+ * ConversationDatabase class manages all database operations for conversations and messages
+ */
 class ConversationDatabase {
 	constructor() {
 		this.db = new Database(DB_PATH);
+		// Enable WAL mode for better concurrent access performance
 		this.db.pragma('journal_mode = WAL');
+		// Enable foreign key constraints
 		this.db.pragma('foreign_keys = ON');
 		this.initSchema();
 		this.prepareStatements();
 	}
 
+	/**
+	 * Initializes database schema with tables and indexes
+	 * Creates conversations and messages tables with appropriate constraints
+	 */
 	initSchema() {
-		// Conversations table
+		// Conversations table - stores conversation metadata
 		this.db.exec(`
 			CREATE TABLE IF NOT EXISTS conversations (
 				id TEXT PRIMARY KEY,
@@ -57,6 +78,10 @@ class ConversationDatabase {
 		`);
 	}
 
+	/**
+	 * Prepares all SQL statements for better performance
+	 * Pre-compiled statements are faster than dynamic SQL
+	 */
 	prepareStatements() {
 		// Conversation statements
 		this.insertConversation = this.db.prepare(`
@@ -111,7 +136,15 @@ class ConversationDatabase {
 		this.updateConversationTimestamp = this.db.prepare(`UPDATE conversations SET updated_at = ? WHERE id = ?`);
 	}
 
-	// Conversation operations
+	/**
+	 * Creates a new conversation record
+	 * @param {string} id - Unique conversation identifier
+	 * @param {string|null} title - Optional conversation title
+	 * @param {string|null} model - AI model used
+	 * @param {string|null} provider - AI provider (openai, gemini, grok)
+	 * @param {Object} metadata - Additional metadata
+	 * @returns {Object} Created conversation info
+	 */
 	createConversation(id, title = null, model = null, provider = null, metadata = {}) {
 		const now = Date.now();
 		this.insertConversation.run(
@@ -161,7 +194,14 @@ class ConversationDatabase {
 		}));
 	}
 
-	// Message operations
+	/**
+	 * Adds a message to a conversation
+	 * @param {string} conversationId - Conversation ID
+	 * @param {string} role - Message role (user, assistant, system)
+	 * @param {string} content - Message content
+	 * @param {Object} details - Additional details (model, provider, usage, metadata)
+	 * @returns {Object} Added message info
+	 */
 	addMessage(conversationId, role, content, details = {}) {
 		const now = Date.now();
 		const { model, provider, usage = {}, metadata = {} } = details;
