@@ -151,14 +151,17 @@ export default async function chatRoutes(app, _opts) {
 			return reply.code(500).send({ error: 'Provider error', details: process.env.NODE_ENV === 'development' ? String(err) : undefined });
 		}
 
-		conversationStore.appendMessage(conversationId, 'assistant', assistantText);
+		// Append assistant with standardized metadata
+		conversationStore.appendMessage(conversationId, 'assistant', assistantText, { model, provider: (GEMINI_SUPPORTED_MODELS.has(model) || model.startsWith('gemini-2.5')) ? 'gemini' : ((GROK_SUPPORTED_MODELS.has(model) || model === 'grok-4') ? 'grok' : 'openai'), usage });
+		const conversation = conversationStore.getConversation(conversationId);
 
 		reply.type('application/json');
 		return {
 			conversationId,
 			model,
 			response: assistantText,
-			usage
+			usage,
+			conversation
 		};
 	});
 
@@ -228,8 +231,9 @@ export default async function chatRoutes(app, _opts) {
 			};
 
 			const finish = () => {
-				conversationStore.appendMessage(conversationId, 'assistant', assistantText);
-				send({ type: 'done', conversationId, model, usage, text: assistantText });
+				conversationStore.appendMessage(conversationId, 'assistant', assistantText, { model, provider: currentProvider, usage });
+				const conversation = conversationStore.getConversation(conversationId);
+				send({ type: 'done', conversationId, model, usage, text: assistantText, conversation });
 				// Standardized: response log (with status and timing)
 				{
 					const statusCode = reply?.raw?.statusCode || 200;
