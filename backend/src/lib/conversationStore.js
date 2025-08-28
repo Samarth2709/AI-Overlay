@@ -218,6 +218,19 @@ class ConversationStore {
 			return { conversations: 0, messages: 0, databaseSize: 0 };
 		}
 	}
+
+	removeLastMessage(conversationId) {
+		const removed = this.db.deleteLastMessage(conversationId);
+		const convo = this.store.get(conversationId);
+		if (convo && removed) {
+			convo.messages.pop();
+			if (convo.transcript && convo.transcript.chatHistory) {
+				convo.transcript.chatHistory.pop();
+			}
+			convo.updatedAt = Date.now();
+		}
+		return removed;
+	}
 }
 
 export const conversationStore = new ConversationStore();
