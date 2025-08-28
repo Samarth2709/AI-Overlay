@@ -50,7 +50,7 @@ function appendHistory(line) {
 
 // ---------- Autocomplete ----------
 const COMMANDS = [
-	'/help','/new','/use','/id','/list','/get','/del','/model','/models','/refresh','/stream','/stats','/clear','/exit'
+	'/help','/new','/use','/id','/list','/get','/del','/model','/models','/refresh','/stream','/stats','/clear','/exit','/retry','/save'
 ];
 function completer(line) {
 	const trimmed = line.trim();
@@ -88,6 +88,16 @@ function createSpinner(text = '') {
 		output.clearLine?.(0);
 	};
 	return { start, stop };
+}
+
+function clearScreen() {
+	if (output?.isTTY) {
+		// Clear screen and scrollback, move cursor to home
+		output.write('\x1b[2J\x1b[3J\x1b[H');
+	} else {
+		// Fallback when piped: print blank lines
+		output.write('\n'.repeat(50));
+	}
 }
 
 // ---------- HTTP helpers ----------
@@ -340,7 +350,7 @@ async function interactive() {
 
 			if (line === '/exit') break;
 			if (line === '/help') { help(); continue; }
-			if (line === '/clear') { console.clear(); continue; }
+			if (line === '/clear') { clearScreen(); continue; }
 
 			if (line === '/models') {
 				console.log('Supported models:');
