@@ -58,7 +58,7 @@ AI-Assistant/
 ### Backend
 - **Runtime**: Node 18+
 - **Provider**: OpenAI (now), pluggable for other providers later.
-- **Conversation**: In-memory store with TTL (2h) keyed by `conversationId`.
+- **Conversation**: Hybrid in-memory cache + persistent SQLite; TTL cache 2h (in-memory), DB retained longer.
 - **System prompt**: Loads a file and prepends as a `system` message.
   - Default: `backend/src/prompts/helper-systemprompt.txt`
   - Override: `SYSTEM_PROMPT_PATH=/absolute/path/to/prompt.txt`
@@ -76,6 +76,53 @@ cd backend
 npm install
 npm run dev
 ```
+
+#### Database (SQLite)
+- **Driver**: `better-sqlite3` (synchronous, fast, safe in a single Node process)
+- **Location**: `backend/data/conversations.db` (configurable via `DATABASE_PATH`)
+- **WAL mode**: Enabled for reliability and concurrent readers
+- **Hybrid storage**: In-memory cache for hot conversations; SQLite for durability and history
+
+Schema overview:
+- **`conversations`**
+  - `id` TEXT PRIMARY KEY
+  - `created_at` INTEGER
+  - `updated_at` INTEGER
+  - `title` TEXT NULL
+  - `model` TEXT NULL (last used)
+  - `provider` TEXT NULL (last used)
+  - `metadata` TEXT NULL (JSON)
+- **`messages`**
+  - `id` INTEGER PRIMARY KEY AUTOINCREMENT
+  - `conversation_id` TEXT REFERENCES `conversations`(`id`) ON DELETE CASCADE
+  - `role` TEXT CHECK IN ('user','assistant','system')
+  - `content` TEXT
+  - `created_at` INTEGER
+  - `model` TEXT NULL
+  - `provider` TEXT NULL
+  - `usage_prompt_tokens` INTEGER DEFAULT 0
+  - `usage_completion_tokens` INTEGER DEFAULT 0
+  - `usage_total_tokens` INTEGER DEFAULT 0
+  - `metadata` TEXT NULL (JSON)
+
+Standardized conversation shape returned by the API and store:
+```json
+{
+  "chatId": "c_ab12cd34kq1xz",
+  "createdAt": 1735439245123,
+  "updatedAt": 1735439250444,
+  "chatHistory": [
+    { "role": "user", "content": "hello", "at": 1735439245123 },
+    { "role": "assistant", "content": "hi, how can i help?", "at": 1735439247000, "model": "gpt-4o-mini", "provider": "openai", "usage": { "prompt_tokens": 3, "completion_tokens": 8, "total_tokens": 11 } }
+  ]
+}
+```
+
+Notes:
+- The cache TTL is ~2h; older entries are evicted from memory, but SQLite retains data longer (cleanup runs separately).
+- Set `DATABASE_PATH` to relocate the DB (e.g., to an external drive or app data dir).
+- Backups: copy the three files together if present: `conversations.db`, `conversations.db-wal`, `conversations.db-shm`.
+- Reset DB: stop the server and delete `backend/data/` (or the file at `DATABASE_PATH`). It will be recreated on next start.
 
 ### CLI Frontend (for backend verification)
 ```bash
@@ -105,9 +152,13 @@ swift run
   - `POST /v1/conversations`
   - Response: `{ "conversationId": string }`
 
-- **Get Conversation Meta**
+- **Get Conversation**
   - `GET /v1/conversations/:id`
-  - Response: `{ "conversationId": string, "updatedAt": number, "messagesCount": number }`
+  - Response: `{ "conversationId": string, "conversation": { "chatId": string, "createdAt": number, "updatedAt": number, "chatHistory": Array<...> } }`
+
+- **List Conversations**
+  - `GET /v1/conversations?limit=50&offset=0`
+  - Response: `{ "conversations": Array<ConversationRow>, "stats": { "conversations": number, "messages": number, "databaseSize": number }, "pagination": { "limit": number, "offset": number } }`
 
 - **Delete Conversation**
   - `DELETE /v1/conversations/:id`
@@ -116,7 +167,7 @@ swift run
 - **Chat**
   - `POST /v1/chat`
   - Body: `{ "message": string, "conversationId"?: string, "model"?: string }`
-  - Response: `{ "conversationId": string, "model": string, "response": string, "usage": { ... } }`
+  - Response: `{ "conversationId": string, "model": string, "response": string, "usage": { ... }, "conversation": { ...standardized shape... } }`
   - Behavior: Prepends `system` message from the configured prompt file (if present).
   - Models:
     - OpenAI: e.g. `gpt-4o-mini` (default)
@@ -130,6 +181,7 @@ swift run
   - Gemini: native streaming; backend relays tokens as SSE. For a smoother UX, Gemini tokens are forwarded word-by-word with tiny delays.
   - Grok (xAI): OpenAI-compatible streaming via `stream: true`.
 - Frontend (Swift): consumes SSE with `URLSession.bytes`, parsing `data:` lines and appending tokens.
+ - Final `done` event includes the standardized `conversation` snapshot.
 
 #### Logging
 - Backend logs are written to `backend/logs/backend.log` (rotated by process restarts).
