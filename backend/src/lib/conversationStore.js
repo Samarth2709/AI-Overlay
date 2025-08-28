@@ -1,16 +1,37 @@
+/**
+ * Conversation Store Management
+ * 
+ * Provides a hybrid storage solution with in-memory caching and database persistence.
+ * Maintains conversation state for active sessions while persisting to SQLite.
+ * 
+ * Features:
+ * - In-memory cache for fast access to recent conversations
+ * - Database persistence for long-term storage
+ * - Automatic cleanup of old conversations
+ * - Dual format support (legacy messages + standardized transcript)
+ */
+
 import { conversationDb } from './database.js';
 
-const DEFAULT_TTL_MS = 1000 * 60 * 60 * 2; // 2 hours
+const DEFAULT_TTL_MS = 1000 * 60 * 60 * 2; // 2 hours cache TTL
 
+/**
+ * ConversationStore manages conversation state with caching and persistence
+ */
 class ConversationStore {
 	constructor(options = {}) {
 		this.ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
-		// Keep in-memory cache for fast access (backwards compatibility)
-		this.store = new Map(); // id -> { messages: [], updatedAt: number, transcript: { chatId, createdAt, updatedAt, chatHistory: [] } }
+		// In-memory cache for fast access (Map: id -> conversation data)
+		this.store = new Map();
+		// Periodic cleanup of expired cache entries
 		this.cleanupInterval = setInterval(() => this.cleanup(), Math.min(this.ttlMs, 60_000));
 		this.db = conversationDb;
 	}
 
+	/**
+	 * Creates a new conversation with a unique ID
+	 * @returns {string} Generated conversation ID
+	 */
 	createConversation() {
 		const id = `c_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
 		const now = Date.now();
@@ -32,6 +53,15 @@ class ConversationStore {
 		return id;
 	}
 
+	/**
+	 * Appends a message to a conversation
+	 * Saves to both database and cache for reliability and performance
+	 * @param {string} conversationId - Conversation ID
+	 * @param {string} role - Message role (user, assistant, system)
+	 * @param {string} content - Message content
+	 * @param {Object} details - Additional details (model, provider, usage)
+	 * @returns {boolean} Success status
+	 */
 	appendMessage(conversationId, role, content, details = {}) {
 		// Save to database first
 		try {
