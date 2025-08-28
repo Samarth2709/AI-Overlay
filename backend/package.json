@@ -10,6 +10,7 @@
   "dependencies": {
     "@fastify/cors": "^9.0.1",
     "@google/genai": "^1.15.0",
+    "better-sqlite3": "^9.6.0",
     "dotenv": "^16.4.5",
     "fastify": "^4.28.1",
     "openai": "^4.52.0"
