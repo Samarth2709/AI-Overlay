@@ -107,6 +107,8 @@ class ConversationDatabase {
 			DELETE FROM conversations 
 			WHERE updated_at < ?
 		`);
+		this.deleteLastMessageStmt = this.db.prepare(`DELETE FROM messages WHERE id = (SELECT MAX(id) FROM messages WHERE conversation_id = ?)`);
+		this.updateConversationTimestamp = this.db.prepare(`UPDATE conversations SET updated_at = ? WHERE id = ?`);
 	}
 
 	// Conversation operations
@@ -229,6 +231,15 @@ class ConversationDatabase {
 	cleanup(maxAgeMs = 1000 * 60 * 60 * 24 * 7) { // Default: 1 week
 		const cutoff = Date.now() - maxAgeMs;
 		return this.cleanupOldConversations.run(cutoff).changes;
+	}
+
+	deleteLastMessage(conversationId) {
+		const result = this.deleteLastMessageStmt.run(conversationId);
+		if (result.changes > 0) {
+			const now = Date.now();
+			this.updateConversationTimestamp.run(now, conversationId);
+		}
+		return result.changes > 0;
 	}
 
 	// Utility methods
