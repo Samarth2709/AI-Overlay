@@ -50,3 +50,6 @@ backend/data/
 *.db
 *.db-wal
 *.db-shm
+
+# Unused/duplicate resources
+frontend-macos/Sources/AIAssistantAppResources/
