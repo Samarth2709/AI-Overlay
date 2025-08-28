@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct Model: Identifiable, Codable {
 	let id: String
@@ -42,6 +43,8 @@ struct TypingDots: View {
 struct ChatBubble: View {
 	let message: Message
 	var isTyping: Bool = false
+	var onCopy: (() -> Void)? = nil
+	var onRedo: (() -> Void)? = nil
 	var body: some View {
 		HStack(alignment: .top) {
 			if message.role == "assistant" {
@@ -58,11 +61,12 @@ struct ChatBubble: View {
 					}
 					if !isTyping && !message.content.isEmpty {
 						HStack(spacing: 14) {
-							Image(systemName: "doc.on.doc").opacity(0.5)
-							Image(systemName: "speaker.wave.2").opacity(0.5)
-							Image(systemName: "hand.thumbsup").opacity(0.5)
-							Image(systemName: "hand.thumbsdown").opacity(0.5)
-							Image(systemName: "arrow.clockwise").opacity(0.5)
+							Button(action: { onCopy?() }) { Image(systemName: "doc.on.doc") }
+								.buttonStyle(.plain)
+								.opacity(0.7)
+							Button(action: { onRedo?() }) { Image(systemName: "arrow.clockwise") }
+								.buttonStyle(.plain)
+								.opacity(0.7)
 						}
 						.font(.system(size: 12))
 						.foregroundColor(.secondary)
@@ -151,7 +155,13 @@ struct ContentView: View {
 				ScrollView {
 					LazyVStack(alignment: .leading, spacing: 14) {
 						ForEach(messages) { msg in
-							ChatBubble(message: msg, isTyping: isSending && msg.id == messages.last?.id && msg.role == "assistant").id(msg.id)
+							ChatBubble(
+								message: msg,
+								isTyping: isSending && msg.role == "assistant" && msg.content.isEmpty,
+								onCopy: { copyMessage(msg) },
+								onRedo: { redoAssistantMessage(msg) }
+							)
+							.id(msg.id)
 						}
 					}
 					.padding(.vertical, 6)
@@ -229,7 +239,7 @@ struct ContentView: View {
 		input = ""
 		isSending = true
 
-		Task { await streamBackend(message: text, conversationId: conversationId, model: selectedModel?.id) }
+		Task { await streamBackend(message: text, conversationId: conversationId, model: selectedModel?.id, regenerate: false) }
 	}
 
 	private func callBackend(message: String, conversationId: String?, model: String?) async -> String? {
@@ -257,11 +267,12 @@ struct ContentView: View {
 		return nil
 	}
 
-	private func streamBackend(message: String, conversationId: String?, model: String?) async {
+	private func streamBackend(message: String, conversationId: String?, model: String?, replaceAssistantAt indexToReplace: Int? = nil, regenerate: Bool = false) async {
 		var components = URLComponents(url: apiBaseURL.appendingPathComponent("/v1/chat/stream"), resolvingAgainstBaseURL: false)!
 		var items: [URLQueryItem] = [URLQueryItem(name: "message", value: message)]
 		if let conversationId { items.append(URLQueryItem(name: "conversationId", value: conversationId)) }
 		if let model { items.append(URLQueryItem(name: "model", value: model)) }
+		if regenerate { items.append(URLQueryItem(name: "regenerate", value: "1")) }
 		components.queryItems = items
 		guard let url = components.url else { await MainActor.run { isSending = false }; return }
 		do {
@@ -270,7 +281,7 @@ struct ContentView: View {
 				await MainActor.run { isSending = false }
 				return
 			}
-			var assistantIndex: Int?
+			var assistantIndex: Int? = indexToReplace
 			var accumulated = ""
 			for try await line in bytes.lines {
 				if line.isEmpty { continue }
@@ -285,8 +296,12 @@ struct ContentView: View {
 							await MainActor.run { self.conversationId = cid }
 						}
 						await MainActor.run {
-							messages.append(Message(role: "assistant", content: ""))
-							assistantIndex = messages.count - 1
+							if assistantIndex == nil {
+								messages.append(Message(role: "assistant", content: ""))
+								assistantIndex = messages.count - 1
+							} else if let idx = assistantIndex, idx < messages.count {
+								messages[idx] = Message(role: "assistant", content: "")
+							}
 						}
 					} else if type == "token" {
 						let tok = obj["token"] as? String ?? ""
@@ -347,6 +362,30 @@ struct ContentView: View {
 				}
 			}
 		}
+	}
+
+	private func copyMessage(_ message: Message) {
+		guard message.role == "assistant" else { return }
+		NSPasteboard.general.clearContents()
+		NSPasteboard.general.setString(message.content, forType: .string)
+	}
+
+	private func redoAssistantMessage(_ message: Message) {
+		guard message.role == "assistant" else { return }
+		guard let idx = messages.firstIndex(where: { $0.id == message.id }) else { return }
+		var userText: String? = nil
+		if idx > 0 {
+			for i in stride(from: idx - 1, through: 0, by: -1) {
+				if messages[i].role == "user" {
+					userText = messages[i].content
+					break
+				}
+			}
+		}
+		guard let text = userText else { return }
+		messages[idx] = Message(role: "assistant", content: "")
+		isSending = true
+		Task { await streamBackend(message: text, conversationId: conversationId, model: selectedModel?.id, replaceAssistantAt: idx, regenerate: true) }
 	}
 }
 
