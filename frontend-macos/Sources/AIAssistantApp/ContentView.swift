@@ -329,13 +329,76 @@ struct ContentView: View {
 			await MainActor.run { isSending = false }
 		}
 	}
-	
+
+	private func refreshBackend(conversationId: String?, model: String?, replaceAssistantAt: Int? = nil) async {
+		guard let conversationId else { return }
+		var request = URLRequest(url: apiBaseURL.appendingPathComponent("/v1/chat/refresh"))
+		request.httpMethod = "POST"
+		request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+		let body: [String: Any] = ["conversationId": conversationId, "model": model ?? ""]
+		request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+		do {
+			let (bytes, response) = try await URLSession.shared.bytes(for: request)
+			guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+				await MainActor.run { isSending = false }
+				return
+			}
+			var assistantIndex: Int? = replaceAssistantAt
+			var accumulated = ""
+			for try await line in bytes.lines {
+				if line.isEmpty { continue }
+				if line.hasPrefix("data: ") {
+					let jsonStr = String(line.dropFirst(6))
+					guard let data = jsonStr.data(using: String.Encoding.utf8),
+							let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+					else { continue }
+					let type = obj["type"] as? String ?? ""
+					if type == "init" {
+						if let cid = obj["conversationId"] as? String {
+							await MainActor.run { self.conversationId = cid }
+						}
+						await MainActor.run {
+							if assistantIndex == nil {
+								messages.append(Message(role: "assistant", content: ""))
+								assistantIndex = messages.count - 1
+							} else if let idx = assistantIndex, idx < messages.count {
+								messages[idx] = Message(role: "assistant", content: "")
+							}
+						}
+					} else if type == "token" {
+						let tok = obj["token"] as? String ?? ""
+						accumulated += tok
+						await MainActor.run {
+							if let idx = assistantIndex, idx < messages.count {
+								let current = messages[idx].content
+								messages[idx] = Message(role: "assistant", content: current + tok)
+							}
+						}
+					} else if type == "done" {
+						let txt = (obj["text"] as? String) ?? accumulated
+						await MainActor.run {
+							if let idx = assistantIndex, idx < messages.count {
+								messages[idx] = Message(role: "assistant", content: txt)
+							}
+							isSending = false
+						}
+					} else if type == "error" {
+						await MainActor.run { isSending = false }
+					}
+				}
+			}
+		} catch {
+			await MainActor.run { isSending = false }
+		}
+	}
+
 	private func loadAvailableModels() {
 		Task {
 			let url = apiBaseURL.appendingPathComponent("/v1/models")
 			var request = URLRequest(url: url)
 			request.httpMethod = "GET"
-			
+
 			do {
 				let (data, response) = try await URLSession.shared.data(for: request)
 				guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
@@ -344,7 +407,7 @@ struct ContentView: View {
 					}
 					return
 				}
-				
+
 				let modelsResponse = try JSONDecoder().decode(ModelsResponse.self, from: data)
 				await MainActor.run {
 					availableModels = modelsResponse.models
@@ -373,19 +436,8 @@ struct ContentView: View {
 	private func redoAssistantMessage(_ message: Message) {
 		guard message.role == "assistant" else { return }
 		guard let idx = messages.firstIndex(where: { $0.id == message.id }) else { return }
-		var userText: String? = nil
-		if idx > 0 {
-			for i in stride(from: idx - 1, through: 0, by: -1) {
-				if messages[i].role == "user" {
-					userText = messages[i].content
-					break
-				}
-			}
-		}
-		guard let text = userText else { return }
-		messages[idx] = Message(role: "assistant", content: "")
 		isSending = true
-		Task { await streamBackend(message: text, conversationId: conversationId, model: selectedModel?.id, replaceAssistantAt: idx, regenerate: true) }
+		Task { await refreshBackend(conversationId: conversationId, model: selectedModel?.id, replaceAssistantAt: idx) }
 	}
 }
 
