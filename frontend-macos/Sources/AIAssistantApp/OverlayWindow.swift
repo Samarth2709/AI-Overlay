@@ -104,8 +104,13 @@ final class OverlayWindow {
 	func show() {
 		guard let panel else { return }
 		
-		// Update position in case screen resolution changed
-		positionInTopRight()
+		// Preserve last user position; only reposition if window is off-screen
+		let isOnAnyScreen = NSScreen.screens.contains { screen in
+			return panel.frame.intersects(screen.visibleFrame)
+		}
+		if !isOnAnyScreen {
+			positionInTopRight()
+		}
 		
 		// Set up ESC key monitoring to hide the window
 		if escMonitor == nil {
