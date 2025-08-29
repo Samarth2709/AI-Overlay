@@ -14,6 +14,9 @@ import { getOpenAIClient } from '../lib/openaiClient.js';
 import { getGeminiClient, GEMINI_SUPPORTED_MODELS } from '../lib/geminiClient.js';
 import { getGrokClient, GROK_SUPPORTED_MODELS } from '../lib/grokClient.js';
 import OpenAI from 'openai';
+import { toolRegistry } from '../lib/toolRegistry.js';
+import { conversationDb } from '../lib/database.js';
+import { createProviderAdapter } from '../lib/providers/index.js';
 import { readFile } from 'fs/promises';
 import { fileURLToPath } from 'url';
 import path from 'path';
@@ -197,6 +200,93 @@ function createStreamingUtils(send) {
 	};
 	
 	return { assistantText: () => assistantText, writeAndFlush, flushByWords };
+}
+
+// Tool-aware execution loop (non-stream). Returns provider response with final text and usage when done.
+async function executeConversationWithTools(provider, model, baseMessages, systemInstruction, options = {}) {
+  const adapter = createProviderAdapter(provider, toolRegistry);
+  const availableTools = ['web_search', 'web_fetch'];
+  const maxToolRounds = 3;
+  let currentMessages = [...baseMessages];
+  const onToolCall = options.onToolCall || (() => {});
+  const onToolResult = options.onToolResult || (() => {});
+  const conversationId = options.conversationId || null;
+
+  for (let round = 0; round < maxToolRounds; round++) {
+    const tools = adapter.formatTools(availableTools);
+    const response = await adapter.callWithTools(model, currentMessages, tools, { systemInstruction });
+    const toolCalls = adapter.parseToolCalls(response);
+    if (!toolCalls || toolCalls.length === 0) {
+      return { response };
+    }
+    // Execute tools
+    const toolResults = [];
+    for (const call of toolCalls) {
+      try {
+        // emit tool_call event
+        try { onToolCall({ id: call.id, name: call.name, args: call.args }); } catch (_) {}
+        toolRegistry.validateCall(call.name, call.args);
+        const started = Date.now();
+        const result = await toolRegistry.executeCall(call.name, call.args, {});
+        try {
+          conversationDb.addToolExecution(options.conversationId || null, call.name, call.args, result, null, Date.now() - started);
+        } catch (_) {}
+        toolResults.push({ id: call.id, name: call.name, result });
+        // emit tool_result event
+        try { onToolResult({ id: call.id, name: call.name, result }); } catch (_) {}
+      } catch (err) {
+        try { conversationDb.addToolExecution(options.conversationId || null, call.name, call.args, null, err.message, null); } catch (_) {}
+        toolResults.push({ id: call.id, name: call.name, error: err.message });
+        try { onToolResult({ id: call.id, name: call.name, error: err.message }); } catch (_) {}
+      }
+    }
+    // Add tool call record + results back into the conversation and persist
+    if (provider === 'gemini') {
+      // For now, return response without executing a follow-up Gemini turn to reduce complexity
+      return { response };
+    } else {
+      // OpenAI/Grok: append assistant message with tool_calls, followed by tool role messages
+      const assistantWithCalls = {
+        role: 'assistant',
+        content: null,
+        tool_calls: toolCalls.map(c => ({
+          id: c.id,
+          type: 'function',
+          function: { name: c.name, arguments: JSON.stringify(c.args || {}) }
+        }))
+      };
+      currentMessages.push(assistantWithCalls);
+      // persist assistant tool_call marker
+      if (conversationId) {
+        try {
+          conversationStore.appendMessage(conversationId, 'assistant', '', {
+            model,
+            provider,
+            metadata: { tool_calls: assistantWithCalls.tool_calls },
+            tool_calls: assistantWithCalls.tool_calls
+          });
+        } catch (_) {}
+      }
+      const toolMsgs = adapter.formatToolResults(toolCalls, toolResults);
+      currentMessages.push(...toolMsgs);
+      // persist each tool result
+      if (conversationId) {
+        for (const call of toolCalls) {
+          const res = toolResults.find(r => r.id === call.id);
+          try {
+            conversationStore.appendMessage(conversationId, 'tool', JSON.stringify(res?.result ?? { error: res?.error || 'no result' }), {
+              metadata: { tool_name: call.name, tool_call_id: call.id },
+              tool_name: call.name,
+              tool_call_id: call.id
+            });
+          } catch (_) {}
+        }
+      }
+    }
+  }
+  // Fallback final call without tools
+  const final = await adapter.callWithTools(model, currentMessages, [], { systemInstruction });
+  return { response: final };
 }
 
 /**
@@ -402,8 +492,24 @@ export default async function chatRoutes(app, _opts) {
 			const provider = getProviderForModel(model);
 			const messages = prepareMessages(history, provider);
 
-			// Make API call
-			const { text: assistantText, usage } = await makeAPICall(provider, model, messages, app, conversationId);
+
+			// Tool-aware path: run tool loop and then extract final text using existing helpers
+			let assistantText = '';
+			let usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+			try {
+				const sys = provider === 'gemini' ? SYSTEM_PROMPT : undefined;
+				const { response } = await executeConversationWithTools(provider, model, messages, sys, {
+					onToolCall: (evt) => app.log.info({ event: 'tool_call', tool: evt.name, args: evt.args, id: evt.id }),
+					onToolResult: (evt) => app.log.info({ event: 'tool_result', tool: evt.name, id: evt.id, error: evt.error, size: JSON.stringify(evt.result || {}).length })
+				});
+				assistantText = extractResponseText(response, provider);
+				usage = extractUsage(response, provider);
+			} catch (toolErr) {
+				// Fallback to non-tool API call
+				const r = await makeAPICall(provider, model, messages, app, conversationId);
+				assistantText = r.text;
+				usage = r.usage;
+			}
 
 			// Log response
 			logProviderResponse(app, provider, model, conversationId, startNs, usage, assistantText, reply);
@@ -531,8 +637,21 @@ export default async function chatRoutes(app, _opts) {
 			const provider = getProviderForModel(model);
 			const messages = prepareMessages(history, provider);
 
-			// Stream response
-			const usage = await makeStreamingAPICall(provider, model, messages, app, conversationId, writeAndFlush, flushByWords);
+			// Stream response with tool transparency: we will not fully stream tool-augmented model output yet.
+			// For now, call tool loop non-streaming, then stream by words for UX consistency.
+			let usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+			try {
+				const sys = provider === 'gemini' ? SYSTEM_PROMPT : undefined;
+				const { response } = await executeConversationWithTools(provider, model, messages, sys, {
+					onToolCall: (evt) => send({ type: 'tool_call', tool: evt.name, args: evt.args, id: evt.id }),
+					onToolResult: (evt) => send({ type: 'tool_result', tool: evt.name, result: evt.result, error: evt.error, id: evt.id })
+				});
+				const final = extractResponseText(response, provider);
+				usage = extractUsage(response, provider);
+				await flushByWords(final);
+			} catch (err) {
+				usage = await makeStreamingAPICall(provider, model, messages, app, conversationId, writeAndFlush, flushByWords);
+			}
 
 			// Finish streaming
 			const finalText = assistantText();
