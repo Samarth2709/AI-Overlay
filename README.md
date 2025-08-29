@@ -10,7 +10,7 @@ A minimal, fast macOS AI assistant you can summon with a global hotkey. Press th
 
 ### High-level Architecture
 - **frontend-macos**: SwiftUI/AppKit app that registers a global hotkey and toggles a lightweight overlay (`NSPanel`) containing a minimalist chat UI. Talks to the backend over HTTP.
-- **backend**: Node.js server exposing REST endpoints. Proxies to OpenAI, Gemini, and Grok, returns results. Supports a configurable system prompt file.
+- **backend**: Node.js server exposing REST endpoints. Proxies to OpenAI, Gemini, and Grok. Includes a model‑agnostic tool registry (web_search, web_fetch), SSE streaming (tokens + tool events), and a configurable system prompt file.
 - **frontend (CLI)**: Simple Node CLI to verify the backend end-to-end via terminal.
 
 ### Project Structure
@@ -57,18 +57,46 @@ AI-Assistant/
 
 ### Backend
 - **Runtime**: Node 18+
-- **Provider**: OpenAI (now), pluggable for other providers later.
+- **Providers**: OpenAI, Gemini, Grok via provider adapters.
 - **Conversation**: Hybrid in-memory cache + persistent SQLite; TTL cache 2h (in-memory), DB retained longer.
 - **System prompt**: Loads a file and prepends as a `system` message.
   - Default: `backend/src/prompts/helper-systemprompt.txt`
   - Override: `SYSTEM_PROMPT_PATH=/absolute/path/to/prompt.txt`
 
+#### Web tools & tool‑calling
+- Single tool registry (`backend/src/lib/toolRegistry.js`) defines tools once (name, JSON‑Schema, handler, metadata) and validates args (Ajv).
+- Provider adapters translate tools to each provider’s syntax:
+  - OpenAI/Grok: `tools: [{type:'function', function:{name, description, parameters}}]` and respond/consume `message.tool_calls`; tool results as `role:'tool'` with `tool_call_id`.
+  - Gemini: `tools: [{ functionDeclarations: [...] }]`; functionCalls parsed; results returned as `functionResponse` parts.
+- Implemented tools (`backend/src/tools/`):
+  - `web_search`
+    - **Purpose**: search the web for current information via Brave Search.
+    - **Env**: `BRAVE_API_KEY` required.
+    - **Args**:
+      - `query` (string, required): the search query.
+      - `max_results` (number, default 10, max 20): number of links to return.
+      - `focus` (string, default "general"): one of `general | news | academic | recent`.
+    - **Output**: `{ results: Array<{ url, title, snippet, published?, favicon? }>, total_results, search_metadata }`.
+    - **Notes**: applies safe caps; logs latency and top domains; cached in‑memory per args with TTL.
+  - `web_fetch`
+    - **Purpose**: fetch web pages and extract readable text for synthesis.
+    - **Args**:
+      - `urls` (array<string>, required, max 5): URLs to fetch.
+      - `extract_mode` (string, default "readable"): one of `readable | full | metadata`.
+    - **Output**: `{ results: Array<{ url, title?, content?, excerpt?, byline?, length?, content_type?, error?, status }>, fetch_metadata }`.
+    - **Notes**: uses Readability + jsdom for `readable`; caps content length; respects timeouts; skips paywalled/login pages when detectable.
+- SSE tool events: during streaming, the backend emits `tool_call` and `tool_result` events in addition to `token`.
+
 #### Env Vars
 - `OPENAI_API_KEY` (or `OPENAIAPI_KEY`) – required for OpenAI
 - `GEMINI_API_KEY` (or `GOOGLE_API_KEY` / `GENERATIVE_LANGUAGE_API_KEY`) – required for Gemini
+- `XAI_API_KEY` (or `GROK_API_KEY`) – required for Grok
+- `BRAVE_API_KEY` – required for web_search
 - `OPENAI_MODEL` – optional, default `gpt-4o-mini`
 - `SYSTEM_PROMPT_PATH` – optional path to a prompt file
 - `PORT` – default `7071`
+
+Env loading: backend searches `.env` in `backend/src/.env` first, then `backend/.env`. You can override with `DOTENV_PATH=/abs/path/.env`.
 
 #### Run the backend
 ```bash
@@ -105,6 +133,16 @@ Schema overview:
   - `usage_total_tokens` INTEGER DEFAULT 0
   - `metadata` TEXT NULL (JSON)
 
+- **`tool_executions`** (analytics)
+  - `id` INTEGER PRIMARY KEY AUTOINCREMENT
+  - `conversation_id` TEXT REFERENCES `conversations`(`id`) ON DELETE CASCADE
+  - `tool_name` TEXT
+  - `args` TEXT (JSON)
+  - `result` TEXT NULL (JSON)
+  - `error` TEXT NULL
+  - `execution_time_ms` INTEGER NULL
+  - `created_at` INTEGER
+
 Standardized conversation shape returned by the API and store:
 ```json
 {
@@ -134,7 +172,49 @@ node src/cli.js "hello"      # one-shot
 CONVERSATION_ID=<id> node src/cli.js
 API_BASE_URL=http://127.0.0.1:7071 node src/cli.js
 ```
-- Interactive commands: `/new` to start a new conversation, `/exit` to quit.
+Interactive commands: `/new`, `/models`, `/model <name>`, `/list`, `/get`, `/del`, `/refresh`, `/retry`, `/save`, `/exit`.
+
+Streaming with tool events:
+```text
+/model gpt-4o-mini
+/stream summarize the latest ai headlines with links
+```
+While streaming, you’ll see lines like:
+- `[tool_call] web_search (call_...)` with an args preview
+- `[tool_result] web_search (call_...)` with result/error preview
+- token lines are streamed as text increments
+
+How to add tool event updates to a frontend (like `cli.js`)
+- Subscribe to the SSE stream (`GET /v1/chat/stream` or `POST /v1/chat/refresh`) and parse `data:` lines.
+- Handle these event payloads (JSON on each `data:` line):
+  - `init`: `{ conversationId, model }`
+  - `tool_call`: `{ id, tool, args }`
+  - `tool_result`: `{ id, tool, result? | error? }`
+  - `token`: `{ token }`
+  - `done`: `{ conversationId, model, usage, text, conversation }`
+  - `error`: `{ error }`
+
+Minimal handler sketch (Node):
+```js
+function handlePayload(payload) {
+  const data = typeof payload === 'string' ? JSON.parse(payload) : payload;
+  switch (data?.type) {
+    case 'init': /* show header */ break;
+    case 'tool_call':
+      console.log(`[tool_call] ${data.tool} (${data.id || ''})`.trim());
+      if (data.args) console.log('  args:', JSON.stringify(data.args).slice(0, 200));
+      break;
+    case 'tool_result':
+      console.log(`[tool_result] ${data.tool} (${data.id || ''})`.trim());
+      if (data.error) console.log('  error:', data.error);
+      else if (data.result) console.log('  result:', JSON.stringify(data.result).slice(0, 200));
+      break;
+    case 'token': process.stdout.write(data.token); break;
+    case 'done': console.log('\n(stream done)'); break;
+    case 'error': console.error('error:', data.error); break;
+  }
+}
+```
 
 ### macOS Overlay App
 #### Build and run (SwiftPM)
@@ -184,12 +264,14 @@ swift run
     - Streams a brand-new assistant response without echoing the previous assistant message
   - SSE events:
     - `init`: `{ conversationId, model }`
+    - `tool_call`: `{ id, tool, args }`
+    - `tool_result`: `{ id, tool, result? | error? }`
     - `token`: `{ token }` – incremental text chunks
     - `done`: `{ conversationId, model, usage, text, conversation }`
     - `error`: `{ error }`
 
 ### Streaming
-- Backend exposes `GET /v1/chat/stream` and `POST /v1/chat/refresh` (both SSE `text/event-stream`) for incremental tokens.
+- Backend exposes `GET /v1/chat/stream` and `POST /v1/chat/refresh` (both SSE `text/event-stream`) for incremental tokens and tool events.
 - Providers:
   - OpenAI: native streaming via Chat Completions.
   - Gemini: native streaming; backend relays tokens as SSE. For a smoother UX, Gemini tokens are forwarded word-by-word with tiny delays.
