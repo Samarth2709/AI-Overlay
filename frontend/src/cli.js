@@ -50,7 +50,7 @@ function appendHistory(line) {
 
 // ---------- Autocomplete ----------
 const COMMANDS = [
-	'/help','/new','/use','/id','/list','/get','/del','/model','/models','/refresh','/stream','/stats','/clear','/exit','/retry','/save'
+	'/help','/new','/use','/id','/list','/get','/del','/model','/models','/refresh','/stats','/clear','/exit','/retry','/save'
 ];
 function completer(line) {
 	const trimmed = line.trim();
@@ -138,10 +138,7 @@ async function deleteConversation(conversationId) {
 	return res.json();
 }
 
-async function chat(message, conversationId, model) {
-	const res = await http('POST', '/v1/chat', { message, conversationId, model });
-	return res.json();
-}
+// (removed non-streaming chat; default interactions now stream)
 
 // ---------- SSE (Refresh streaming) ----------
 async function refreshStream({ conversationId, model, onInit, onToken, onDone, onError }) {
@@ -157,6 +154,23 @@ async function refreshStream({ conversationId, model, onInit, onToken, onDone, o
 			switch (data?.type) {
 				case 'init': onInit && onInit(data); break;
 				case 'token': onToken && onToken(data); break;
+				case 'tool_call':
+					console.log(`[tool_call] ${data.tool} ${data.id ? `(${data.id})` : ''}`.trim());
+					if (data.args) {
+						const argsPreview = JSON.stringify(data.args).slice(0, 200);
+						console.log(`  args: ${argsPreview}${argsPreview.length >= 200 ? '…' : ''}`);
+					}
+					break;
+				case 'tool_result':
+					console.log(`[tool_result] ${data.tool} ${data.id ? `(${data.id})` : ''}`.trim());
+					if (data.error) {
+						console.log(`  error: ${data.error}`);
+					} else if (data.result) {
+						const resPreview = typeof data.result === 'string' ? data.result : JSON.stringify(data.result);
+						const pr = resPreview.slice(0, 200);
+						console.log(`  result: ${pr}${resPreview.length >= 200 ? '…' : ''}`);
+					}
+					break;
 				case 'done': onDone && onDone(data); break;
 				case 'error': onError && onError(data); break;
 				default: /* ignore */ break;
@@ -223,6 +237,23 @@ async function chatStream({ message, conversationId, model, regenerate, onInit, 
 			switch (data?.type) {
 				case 'init': onInit && onInit(data); break;
 				case 'token': onToken && onToken(data); break;
+				case 'tool_call':
+					console.log(`[tool_call] ${data.tool} ${data.id ? `(${data.id})` : ''}`.trim());
+					if (data.args) {
+						const argsPreview = JSON.stringify(data.args).slice(0, 200);
+						console.log(`  args: ${argsPreview}${argsPreview.length >= 200 ? '…' : ''}`);
+					}
+					break;
+				case 'tool_result':
+					console.log(`[tool_result] ${data.tool} ${data.id ? `(${data.id})` : ''}`.trim());
+					if (data.error) {
+						console.log(`  error: ${data.error}`);
+					} else if (data.result) {
+						const resPreview = typeof data.result === 'string' ? data.result : JSON.stringify(data.result);
+						const pr = resPreview.slice(0, 200);
+						console.log(`  result: ${pr}${resPreview.length >= 200 ? '…' : ''}`);
+					}
+					break;
 				case 'done': onDone && onDone(data); break;
 				case 'error': onError && onError(data); break;
 				default: /* ignore */ break;
@@ -278,15 +309,31 @@ async function oneShot(message, conversationId, model) {
 		process.exitCode = 1;
 		return;
 	}
-	const spin = createSpinner('thinking...');
-	spin.start();
 	try {
-		const json = await chat(message, conversationId, model);
-		spin.stop();
-		console.log(`[conversationId] ${json.conversationId}`);
-		console.log(json.response);
+		let printedAny = false;
+		await chatStream({
+			message,
+			conversationId,
+			model,
+			regenerate: false,
+			onInit: (data) => {
+				console.log(`streaming [${data?.conversationId || conversationId || '(new)'}] model=${data?.model || model || 'default'}`);
+			},
+			onToken: (data) => {
+				if (!data || typeof data.token !== 'string') return;
+				printedAny = true;
+				output.write(data.token);
+			},
+			onDone: (data) => {
+				if (printedAny) output.write('\n');
+				console.log('(stream done)');
+			},
+			onError: (data) => {
+				if (printedAny) output.write('\n');
+				console.error('stream error:', typeof data === 'string' ? data : JSON.stringify(data));
+			}
+		});
 	} catch (err) {
-		spin.stop();
 		throw err;
 	}
 }
@@ -329,7 +376,7 @@ async function interactive() {
 		console.log('  /models                 List supported model names');
 		console.log('  /refresh                Refresh last AI response (SSE streaming)');
 		console.log('  /retry                  Alias for /refresh');
-		console.log('  /stream <message>       Stream a message (GET /v1/chat/stream)');
+		console.log('  (responses stream by default)');
 		console.log('  /save [file]            Save current conversation to a file');
 		console.log('  /stats                  Show DB stats');
 		console.log('  /clear                  Clear the screen');
@@ -514,39 +561,7 @@ async function interactive() {
 				continue;
 			}
 
-			if (line.startsWith('/stream ')) {
-				const msg = line.slice(8).trim();
-				if (!msg) { console.log('usage: /stream <message>'); continue; }
-				try {
-					let printedAny = false;
-					await chatStream({
-						message: msg,
-						conversationId,
-						model: currentModel || undefined,
-						regenerate: false,
-						onInit: (data) => {
-							console.log(`streaming [${data?.conversationId || conversationId || '(new)'}] model=${data?.model || currentModel || 'default'}`);
-						},
-						onToken: (data) => {
-							if (!data || typeof data.token !== 'string') return;
-							printedAny = true;
-							output.write(data.token);
-						},
-						onDone: (data) => {
-							if (data?.conversationId) conversationId = data.conversationId;
-							if (printedAny) output.write('\n');
-							console.log('(stream done)');
-						},
-						onError: (data) => {
-							if (printedAny) output.write('\n');
-							console.error('stream error:', typeof data === 'string' ? data : JSON.stringify(data));
-						}
-					});
-				} catch (err) {
-					console.error(String(err));
-				}
-				continue;
-			}
+
 
 			if (line.startsWith('/save')) {
 				const arg = line.replace('/save', '').trim();
@@ -577,14 +592,32 @@ async function interactive() {
 				continue;
 			}
 
-			// default: send message (non-stream)
+			// default: send message (streaming)
 			try {
-				const spin = createSpinner('thinking...');
-				spin.start();
-				const json = await chat(line, conversationId, currentModel || undefined);
-				spin.stop();
-				conversationId = json.conversationId;
-				console.log(`assistant> ${json.response}\n`);
+				let printedAny = false;
+				await chatStream({
+					message: line,
+					conversationId,
+					model: currentModel || undefined,
+					regenerate: false,
+					onInit: (data) => {
+						console.log(`streaming [${data?.conversationId || conversationId || '(new)'}] model=${data?.model || currentModel || 'default'}`);
+					},
+					onToken: (data) => {
+						if (!data || typeof data.token !== 'string') return;
+						printedAny = true;
+						output.write(data.token);
+					},
+					onDone: (data) => {
+						if (data?.conversationId) conversationId = data.conversationId;
+						if (printedAny) output.write('\n');
+						console.log('(stream done)');
+					},
+					onError: (data) => {
+						if (printedAny) output.write('\n');
+						console.error('stream error:', typeof data === 'string' ? data : JSON.stringify(data));
+					}
+				});
 			} catch (err) {
 				console.error(String(err));
 			}
