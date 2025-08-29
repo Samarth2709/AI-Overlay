@@ -208,7 +208,7 @@ struct ContentView: View {
 	
 	private func updateWindowSize() {
 		let width: CGFloat = 360
-		let height: CGFloat = messages.isEmpty ? 60 : min(500, max(200, CGFloat(messages.count * 80 + 120)))
+		let height: CGFloat = messages.isEmpty ? 60 : 400
 		
 		DispatchQueue.main.async {
 			OverlayWindow.shared.updateSize(width: width, height: height, animated: !messages.isEmpty)
