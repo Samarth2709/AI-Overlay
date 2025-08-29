@@ -54,7 +54,7 @@ final class OverlayWindow {
 		panel.hasShadow = false
 		panel.isOpaque = false
 		panel.backgroundColor = .clear
-		panel.collectionBehavior = [.fullScreenAuxiliary, .moveToActiveSpace]
+		panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 		panel.isMovableByWindowBackground = true
 		panel.animationBehavior = .none
 
