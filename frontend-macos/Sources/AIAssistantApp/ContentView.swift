@@ -36,6 +36,22 @@ struct Message: Identifiable, Equatable {
 	}
 }
 
+/**
+ * Represents an active tool call notification
+ * Displayed to the user while backend is executing tools
+ */
+struct ToolCall: Identifiable, Equatable {
+	let id: String         // Tool call ID from backend
+	let tool: String       // Tool name (e.g., "web_search")
+	let args: String       // Brief description of arguments
+	var isCompleted: Bool  // Whether the tool execution finished
+	var hasError: Bool     // Whether the tool execution failed
+
+	static func == (lhs: ToolCall, rhs: ToolCall) -> Bool {
+		lhs.id == rhs.id && lhs.tool == rhs.tool && lhs.isCompleted == rhs.isCompleted && lhs.hasError == rhs.hasError
+	}
+}
+
 // MARK: - UI Components
 
 /**
@@ -65,12 +81,74 @@ struct TypingDots: View {
 }
 
 /**
+ * Wavy animated text component for tool notifications
+ * Creates a wave effect by animating each character individually
+ */
+struct WavyText: View {
+	let text: String
+	@State private var animationOffsets: [CGFloat] = []
+	
+	var body: some View {
+		HStack(spacing: 0) {
+			ForEach(Array(text.enumerated()), id: \.offset) { index, character in
+				Text(String(character))
+					.font(.custom("Montserrat", size: 13).weight(.light))
+					.foregroundColor(.secondary)
+					.offset(y: animationOffsets.indices.contains(index) ? animationOffsets[index] : 0)
+			}
+		}
+		.onAppear {
+			startWaveAnimation()
+		}
+		.onReceive(Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()) { _ in
+			startWaveAnimation()
+		}
+	}
+	
+	private func startWaveAnimation() {
+		// Initialize offsets array if needed
+		if animationOffsets.count != text.count {
+			animationOffsets = Array(repeating: 0, count: text.count)
+		}
+		
+		// Create wave animation with staggered timing for each character
+		for i in 0..<text.count {
+			let delay = Double(i) * 0.03  // Much faster character stagger (was 0.1)
+			withAnimation(.easeInOut(duration: 0.2).delay(delay)) {  // Faster animation (was 0.6)
+				animationOffsets[i] = -1
+			}
+			withAnimation(.easeInOut(duration: 0.2).delay(delay + 0.1)) {  // Faster return (was 0.3)
+				animationOffsets[i] = 0
+			}
+		}
+	}
+}
+
+/**
+ * Minimal tool call notification shown instead of typing dots
+ * Displays a brief description of the active tool execution with wavy animation
+ */
+struct MinimalToolNotification: View {
+	let activeToolCalls: [ToolCall]
+	
+	var body: some View {
+		if let currentTool = activeToolCalls.first(where: { !$0.isCompleted }) ?? activeToolCalls.first {
+			WavyText(text: currentTool.args.isEmpty ? "Working..." : currentTool.args)
+		} else {
+			// Fallback to typing dots if no tool calls
+			TypingDots()
+		}
+	}
+}
+
+/**
  * Chat bubble component for displaying messages in the conversation
  * Handles both user and assistant messages with different styling and actions
  */
 struct ChatBubble: View {
 	let message: Message              // The message to display
 	var isTyping: Bool = false        // Whether to show typing animation
+	var activeToolCalls: [ToolCall] = [] // Active tool calls to show instead of typing dots
 	var onCopy: (() -> Void)? = nil   // Callback for copy action
 	var onRedo: (() -> Void)? = nil   // Callback for regenerate action
 	
@@ -81,8 +159,8 @@ struct ChatBubble: View {
 				VStack(alignment: .leading, spacing: 10) {
 					Group {
 						if isTyping && message.content.isEmpty {
-							// Show typing animation when assistant is responding
-							TypingDots()
+							// Show tool notification or typing animation when assistant is responding
+							MinimalToolNotification(activeToolCalls: activeToolCalls)
 								.frame(maxWidth: .infinity, alignment: .leading)
 						} else {
 							// Show actual message content
@@ -160,6 +238,8 @@ struct ContentView: View {
 	@State private var modelToastText: String = ""
 	/// ID of message to scroll to (used for auto-scrolling during streaming)
 	@State private var scrollToMessageId: UUID? = nil
+	/// Active tool calls being executed by the backend
+	@State private var activeToolCalls: [ToolCall] = []
 
 	/// Base URL for the backend API server
 	private let apiBaseURL = URL(string: "http://127.0.0.1:7071")!
@@ -176,7 +256,8 @@ struct ContentView: View {
 					isLoadingModels: isLoadingModels,
 					onModelSelect: { selectedModel = $0 },
 					onSend: send,
-					onNewChat: startNewChat
+					onNewChat: startNewChat,
+					activeToolCalls: activeToolCalls
 				)
 			} else {
 				// Show expanded view with full conversation when messages exist
@@ -192,7 +273,8 @@ struct ContentView: View {
 					onSend: send,
 					onNewChat: startNewChat,
 					onCopy: copyMessage,
-					onRedo: redoAssistantMessage
+					onRedo: redoAssistantMessage,
+					activeToolCalls: activeToolCalls
 				)
 			}
 		}
@@ -429,6 +511,39 @@ struct ContentView: View {
 								scrollToMessageId = messages[idx].id
 							}
 						}
+					} else if type == "tool_call" {
+						// Process tool call notification
+						let toolId = obj["id"] as? String ?? ""
+						let toolName = obj["tool"] as? String ?? ""
+						let argsObj = obj["args"] as? [String: Any]
+						let argsDescription = formatToolArgs(toolName: toolName, args: argsObj)
+						
+						await MainActor.run {
+							let toolCall = ToolCall(
+								id: toolId,
+								tool: toolName,
+								args: argsDescription,
+								isCompleted: false,
+								hasError: false
+							)
+							activeToolCalls.append(toolCall)
+						}
+					} else if type == "tool_result" {
+						// Process tool result notification
+						let toolId = obj["id"] as? String ?? ""
+						let hasError = obj["error"] != nil
+						
+						await MainActor.run {
+							if let index = activeToolCalls.firstIndex(where: { $0.id == toolId }) {
+								activeToolCalls[index] = ToolCall(
+									id: activeToolCalls[index].id,
+									tool: activeToolCalls[index].tool,
+									args: activeToolCalls[index].args,
+									isCompleted: true,
+									hasError: hasError
+								)
+							}
+						}
 					} else if type == "token" {
 						// Process individual token from the AI response
 						let tok = obj["token"] as? String ?? ""
@@ -444,15 +559,20 @@ struct ContentView: View {
 					} else if type == "done" {
 						// Finalize the response with complete text
 						let txt = (obj["text"] as? String) ?? accumulated // Use provided text or accumulated
-						await MainActor.run {
-							if let idx = assistantIndex, idx < messages.count {
-								messages[idx] = Message(role: "assistant", content: txt)
+													await MainActor.run {
+								if let idx = assistantIndex, idx < messages.count {
+									messages[idx] = Message(role: "assistant", content: txt)
+								}
+								// Clear tool calls when response is complete
+								activeToolCalls.removeAll()
+								isSending = false // Mark as complete
 							}
-							isSending = false // Mark as complete
-						}
 					} else if type == "error" {
 						// Handle streaming errors
-						await MainActor.run { isSending = false }
+						await MainActor.run { 
+							activeToolCalls.removeAll()
+							isSending = false 
+						}
 					}
 				}
 			}
@@ -517,6 +637,39 @@ struct ContentView: View {
 								messages[idx] = Message(role: "assistant", content: "")
 							}
 						}
+					} else if type == "tool_call" {
+						// Process tool call notification
+						let toolId = obj["id"] as? String ?? ""
+						let toolName = obj["tool"] as? String ?? ""
+						let argsObj = obj["args"] as? [String: Any]
+						let argsDescription = formatToolArgs(toolName: toolName, args: argsObj)
+						
+						await MainActor.run {
+							let toolCall = ToolCall(
+								id: toolId,
+								tool: toolName,
+								args: argsDescription,
+								isCompleted: false,
+								hasError: false
+							)
+							activeToolCalls.append(toolCall)
+						}
+					} else if type == "tool_result" {
+						// Process tool result notification
+						let toolId = obj["id"] as? String ?? ""
+						let hasError = obj["error"] != nil
+						
+						await MainActor.run {
+							if let index = activeToolCalls.firstIndex(where: { $0.id == toolId }) {
+								activeToolCalls[index] = ToolCall(
+									id: activeToolCalls[index].id,
+									tool: activeToolCalls[index].tool,
+									args: activeToolCalls[index].args,
+									isCompleted: true,
+									hasError: hasError
+								)
+							}
+						}
 					} else if type == "token" {
 						// Process streaming tokens
 						let tok = obj["token"] as? String ?? ""
@@ -530,15 +683,20 @@ struct ContentView: View {
 					} else if type == "done" {
 						// Finalize regenerated response
 						let txt = (obj["text"] as? String) ?? accumulated
-						await MainActor.run {
-							if let idx = assistantIndex, idx < messages.count {
-								messages[idx] = Message(role: "assistant", content: txt)
+													await MainActor.run {
+								if let idx = assistantIndex, idx < messages.count {
+									messages[idx] = Message(role: "assistant", content: txt)
+								}
+								// Clear tool calls when regeneration is complete
+								activeToolCalls.removeAll()
+								isSending = false
 							}
-							isSending = false
-						}
 					} else if type == "error" {
 						// Handle regeneration errors
-						await MainActor.run { isSending = false }
+						await MainActor.run { 
+							activeToolCalls.removeAll()
+							isSending = false 
+						}
 					}
 				}
 			}
@@ -606,6 +764,31 @@ struct ContentView: View {
 		isSending = true
 		Task { await refreshBackend(conversationId: conversationId, model: selectedModel?.id, replaceAssistantAt: idx) }
 	}
+	
+	/**
+	 * Formats tool arguments into a brief, user-friendly description
+	 * Used for displaying tool call notifications to the user
+	 */
+	private func formatToolArgs(toolName: String, args: [String: Any]?) -> String {
+		guard let args = args else { return "" }
+		
+		switch toolName {
+		case "web_search":
+			if let query = args["query"] as? String {
+				return "Searching: \(query)"
+			}
+		case "web_fetch":
+			if let urls = args["urls"] as? [String] {
+				let count = urls.count
+				return "Fetching \(count) page\(count == 1 ? "" : "s")"
+			}
+		default:
+			// For unknown tools, show a generic description
+			return "Using \(toolName)"
+		}
+		
+		return "Working..."
+	}
 }
 
 // MARK: - Compact Input View
@@ -626,54 +809,56 @@ struct CompactInputView: View {
 	let onModelSelect: (Model) -> Void   // Callback for model selection
 	let onSend: () -> Void              // Callback for sending message
 	let onNewChat: () -> Void           // Callback for starting new chat
+	let activeToolCalls: [ToolCall]      // Active tool calls to display
 	
 	var body: some View {
+		// Input row
 		HStack(spacing: 8) {
-			Image(systemName: "sparkles")
-				.foregroundColor(.secondary)
-				.font(.system(size: 12))
-			
-			TextField("Ask anything...", text: $input)
-				.textFieldStyle(.plain)
-				.font(.custom("Montserrat", size: 13).weight(.medium))
-				.focused($isInputFocused)
-				.onSubmit { onSend() }
-			
-			if !input.isEmpty {
-				Button(action: onSend) {
-					Image(systemName: "arrow.up.circle.fill")
-						.foregroundColor(.primary)
-						.font(.system(size: 16))
-				}
-				.buttonStyle(.plain)
-				.opacity(isSending ? 0.5 : 1.0)
-				.disabled(isSending)
-			} else {
-				Menu {
-					if isLoadingModels {
-						Text("Loading models...")
-							.foregroundColor(.secondary)
-					} else {
-						ForEach(availableModels) { model in
-							Button(action: { onModelSelect(model) }) {
-								VStack(alignment: .leading, spacing: 2) {
-									Text(model.name)
-										.font(.custom("Montserrat", size: 11).weight(.regular))
-									Text(model.description)
-										.font(.custom("Montserrat", size: 10).weight(.light))
-										.foregroundColor(.secondary)
+				Image(systemName: "sparkles")
+					.foregroundColor(.secondary)
+					.font(.system(size: 12))
+				
+				TextField("Ask anything...", text: $input)
+					.textFieldStyle(.plain)
+					.font(.custom("Montserrat", size: 13).weight(.medium))
+					.focused($isInputFocused)
+					.onSubmit { onSend() }
+				
+				if !input.isEmpty {
+					Button(action: onSend) {
+						Image(systemName: "arrow.up.circle.fill")
+							.foregroundColor(.primary)
+							.font(.system(size: 16))
+					}
+					.buttonStyle(.plain)
+					.opacity(isSending ? 0.5 : 1.0)
+					.disabled(isSending)
+				} else {
+					Menu {
+						if isLoadingModels {
+							Text("Loading models...")
+								.foregroundColor(.secondary)
+						} else {
+							ForEach(availableModels) { model in
+								Button(action: { onModelSelect(model) }) {
+									VStack(alignment: .leading, spacing: 2) {
+										Text(model.name)
+											.font(.custom("Montserrat", size: 11).weight(.regular))
+										Text(model.description)
+											.font(.custom("Montserrat", size: 10).weight(.light))
+											.foregroundColor(.secondary)
+									}
 								}
 							}
 						}
+					} label: {
+						Image(systemName: "cube.box")
+							.foregroundColor(.secondary)
+							.font(.system(size: 12))
 					}
-				} label: {
-					Image(systemName: "cube.box")
-						.foregroundColor(.secondary)
-						.font(.system(size: 12))
+					.buttonStyle(.plain)
+					.disabled(isLoadingModels)
 				}
-				.buttonStyle(.plain)
-				.disabled(isLoadingModels)
-			}
 		}
 		.padding(.horizontal, 14)
 		.padding(.vertical, 10)
@@ -716,6 +901,7 @@ struct ExpandedChatView: View {
 	let onNewChat: () -> Void           // Callback for starting new chat
 	let onCopy: (Message) -> Void       // Callback for copying messages
 	let onRedo: (Message) -> Void       // Callback for regenerating messages
+	let activeToolCalls: [ToolCall]      // Active tool calls to display
 	
 	var body: some View {
 		VStack(spacing: 0) {
@@ -777,14 +963,16 @@ struct ExpandedChatView: View {
 					LazyVStack(alignment: .leading, spacing: 10) {
 						ForEach(messages) { msg in
 							// Render each message as a compact chat bubble
-							CompactChatBubble(
-								message: msg,
-								isTyping: isSending && msg.role == "assistant" && msg.content.isEmpty,
-								onCopy: { onCopy(msg) },
-								onRedo: { onRedo(msg) }
-							)
+													CompactChatBubble(
+							message: msg,
+							isTyping: isSending && msg.role == "assistant" && msg.content.isEmpty,
+							activeToolCalls: activeToolCalls,
+							onCopy: { onCopy(msg) },
+							onRedo: { onRedo(msg) }
+						)
 							.id(msg.id) // Unique ID for scrolling and animations
 						}
+						
 						// Invisible bottom anchor for scrolling to the very end
 						// This ensures we can always scroll to the bottom of the conversation
 						Color.clear
@@ -870,6 +1058,7 @@ struct ExpandedChatView: View {
 struct CompactChatBubble: View {
 	let message: Message              // Message to display
 	var isTyping: Bool = false        // Whether to show typing animation
+	var activeToolCalls: [ToolCall] = [] // Active tool calls to show instead of typing dots
 	var onCopy: (() -> Void)? = nil   // Callback for copy action
 	var onRedo: (() -> Void)? = nil   // Callback for regenerate action
 	
@@ -880,8 +1069,8 @@ struct CompactChatBubble: View {
 				VStack(alignment: .leading, spacing: 6) {
 					Group {
 						if isTyping && message.content.isEmpty {
-							// Show typing animation when assistant is responding
-							TypingDots()
+							// Show tool notification or typing animation when assistant is responding
+							MinimalToolNotification(activeToolCalls: activeToolCalls)
 								.frame(maxWidth: .infinity, alignment: .leading)
 						} else {
 							// Show actual message content with text selection enabled
