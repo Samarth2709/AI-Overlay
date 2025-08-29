@@ -165,7 +165,7 @@ struct ChatBubble: View {
 						} else {
 							// Show actual message content
 							Text(message.content)
-								.font(.custom("Montserrat", size: 15).weight(.light))
+								.font(.custom("Montserrat", size: 14).weight(.medium))
 								.frame(maxWidth: .infinity, alignment: .leading)
 						}
 					}
@@ -194,7 +194,7 @@ struct ChatBubble: View {
 					.font(.custom("Montserrat", size: 14).weight(.medium))
 					.padding(.vertical, 10)
 					.padding(.horizontal, 14)
-					.background(Color.gray.opacity(0.25)) // Subtle gray background
+					.background(Color.gray.opacity(0.3)) // Subtle gray background (slightly darker)
 					.cornerRadius(16)
 					.frame(maxWidth: 380, alignment: .trailing) // Limit width for readability
 			}
@@ -1075,7 +1075,7 @@ struct CompactChatBubble: View {
 						} else {
 							// Show actual message content with text selection enabled
 							Text(message.content)
-								.font(.custom("Montserrat", size: 13).weight(.light))
+								.font(.custom("Montserrat", size: 12).weight(.medium))
 								.frame(maxWidth: .infinity, alignment: .leading)
 								.textSelection(.enabled) // Allow users to select and copy text
 						}
@@ -1111,7 +1111,7 @@ struct CompactChatBubble: View {
 					.font(.custom("Montserrat", size: 12).weight(.medium))
 					.padding(.vertical, 8)
 					.padding(.horizontal, 12)
-					.background(Color.white.opacity(0.1)) // Subtle white background
+					.background(Color.white.opacity(0.15)) // Subtle white background (slightly darker)
 					.cornerRadius(10)
 					.frame(maxWidth: 280, alignment: .trailing) // Limit width for readability
 			}
