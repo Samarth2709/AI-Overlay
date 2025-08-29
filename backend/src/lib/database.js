@@ -76,6 +76,24 @@ class ConversationDatabase {
 			CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
 			CREATE INDEX IF NOT EXISTS idx_conversations_updated_at ON conversations(updated_at);
 		`);
+
+		// Tool executions analytics table
+		this.db.exec(`
+			CREATE TABLE IF NOT EXISTS tool_executions (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				conversation_id TEXT NOT NULL,
+				tool_name TEXT NOT NULL,
+				args TEXT NOT NULL,
+				result TEXT,
+				error TEXT,
+				execution_time_ms INTEGER,
+				created_at INTEGER NOT NULL,
+				FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+			);
+			CREATE INDEX IF NOT EXISTS idx_tool_execs_convo ON tool_executions(conversation_id);
+			CREATE INDEX IF NOT EXISTS idx_tool_execs_created ON tool_executions(created_at);
+			CREATE INDEX IF NOT EXISTS idx_tool_execs_tool ON tool_executions(tool_name);
+		`);
 	}
 
 	/**
@@ -134,6 +152,13 @@ class ConversationDatabase {
 		`);
 		this.deleteLastMessageStmt = this.db.prepare(`DELETE FROM messages WHERE id = (SELECT MAX(id) FROM messages WHERE conversation_id = ?)`);
 		this.updateConversationTimestamp = this.db.prepare(`UPDATE conversations SET updated_at = ? WHERE id = ?`);
+
+		// Tool executions
+		this.insertToolExecution = this.db.prepare(`
+			INSERT INTO tool_executions (
+				conversation_id, tool_name, args, result, error, execution_time_ms, created_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?)
+		`);
 	}
 
 	/**
@@ -223,6 +248,23 @@ class ConversationDatabase {
 		this.updateConversationMeta(conversationId, {});
 		
 		return { conversation_id: conversationId, role, content, created_at: now };
+	}
+
+	addToolExecution(conversationId, toolName, args, result, error, executionTimeMs) {
+		const now = Date.now();
+		try {
+			this.insertToolExecution.run(
+				conversationId,
+				toolName,
+				JSON.stringify(args || {}),
+				result !== undefined ? JSON.stringify(result) : null,
+				error || null,
+				Number.isFinite(executionTimeMs) ? Math.floor(executionTimeMs) : null,
+				now
+			);
+		} catch (err) {
+			// Swallow to avoid impacting request flow
+		}
 	}
 
 	getConversationMessages(conversationId) {

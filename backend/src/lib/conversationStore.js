@@ -98,6 +98,9 @@ class ConversationStore {
 			if (model) entry.model = model;
 			if (provider) entry.provider = provider;
 			if (usage) entry.usage = usage;
+			if (details.tool_calls) entry.tool_calls = details.tool_calls;
+			if (details.tool_name) entry.tool_name = details.tool_name;
+			if (details.tool_call_id) entry.tool_call_id = details.tool_call_id;
 		}
 		convo.transcript.chatHistory.push(entry);
 		convo.transcript.updatedAt = now;
