@@ -534,7 +534,7 @@ struct ExpandedChatView: View {
 		VStack(spacing: 0) {
 			// Minimal header
 			HStack(spacing: 8) {
-				Text("AI Assistant")
+				Text("dave")
 					.font(.custom("Montserrat", size: 11).weight(.medium))
 					.foregroundColor(.secondary)
 				
@@ -593,28 +593,31 @@ struct ExpandedChatView: View {
 							)
 							.id(msg.id)
 						}
+						// Invisible bottom anchor for scrolling to the very end
+						Color.clear
+							.frame(height: 1)
+							.id("__scroll_bottom__")
 					}
 					.padding(.horizontal, 14)
 					.padding(.vertical, 8)
 				}
 				.frame(maxWidth: .infinity, maxHeight: .infinity)
 				.id(scrollViewID)
-				.onChange(of: targetMessageId) { id in
-					guard let id else { return }
+				.onChange(of: targetMessageId) { _ in
 					DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
 						withAnimation(.easeOut(duration: 0.2)) {
-							proxy.scrollTo(id, anchor: .bottom)
+							proxy.scrollTo("__scroll_bottom__", anchor: .bottom)
 						}
 					}
 				}
-				.onReceive(Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()) { _ in
+				.onReceive(Timer.publish(every: 0.01, on: .main, in: .common).autoconnect()) { _ in
 					// Check if content has changed during streaming
 					if let lastMessage = messages.last, lastMessage.role == "assistant" {
 						let currentLength = lastMessage.content.count
 						if currentLength != lastContentLength {
 							lastContentLength = currentLength
 							// Scroll immediately on content change
-							proxy.scrollTo(lastMessage.id, anchor: .bottom)
+							proxy.scrollTo("__scroll_bottom__", anchor: .bottom)
 						}
 					}
 				}
